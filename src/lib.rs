@@ -1,6 +1,6 @@
 /// `InputCellID` is a unique identifier for an input cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InputCellID();
+pub struct InputCellID(usize);
 /// `ComputeCellID` is a unique identifier for a compute cell.
 /// Values of type `InputCellID` and `ComputeCellID` should not be mutually assignable,
 /// demonstrated by the following tests:
@@ -16,9 +16,9 @@ pub struct InputCellID();
 /// let compute: react::InputCellID = r.create_compute(&[react::CellID::Input(input)], |_| 222).unwrap();
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ComputeCellID();
+pub struct ComputeCellID(usize);
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CallbackID();
+pub struct CallbackID(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CellID {
@@ -33,20 +33,30 @@ pub enum RemoveCallbackError {
 }
 
 pub struct Reactor<T> {
-    // Just so that the compiler doesn't complain about an unused type parameter.
-    // You probably want to delete this field.
-    dummy: ::std::marker::PhantomData<T>,
+    input_ids: Vec<InputCellID>,
+    input_vals: Vec<T>,
+    compute_ids: Vec<ComputeCellID>,
+    compute_fns: Vec<Box<Fn(&[T]) -> T>>,
 }
 
 // You are guaranteed that Reactor will only be tested against types that are Copy + PartialEq.
 impl<T: Copy + PartialEq> Reactor<T> {
     pub fn new() -> Self {
-        unimplemented!()
+        Reactor {
+            input_ids: Vec::new(),
+            input_vals: Vec::new(),
+            compute_ids: Vec::new(),
+            compute_fns: Vec::new(),
+        }
     }
 
     // Creates an input cell with the specified initial value, returning its ID.
-    pub fn create_input(&mut self, _initial: T) -> InputCellID {
-        unimplemented!()
+    pub fn create_input(&mut self, initial: T) -> InputCellID {
+        let idx = self.input_ids.len();
+        let id = InputCellID(idx);
+        self.input_ids.push(id.clone());
+        self.input_vals.push(initial);
+        id
     }
 
     // Creates a compute cell with the specified dependencies and compute function.
@@ -78,7 +88,10 @@ impl<T: Copy + PartialEq> Reactor<T> {
     // It turns out this introduces a significant amount of extra complexity to this exercise.
     // We chose not to cover this here, since this exercise is probably enough work as-is.
     pub fn value(&self, id: CellID) -> Option<T> {
-        unimplemented!("Get the value of the cell whose id is {:?}", id)
+        match id {
+            CellID::Input(InputCellID(idx)) => self.input_vals.get(idx).cloned(),
+            _ => unreachable!(),
+        }
     }
 
     // Sets the value of the specified input cell.
