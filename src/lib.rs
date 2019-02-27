@@ -102,8 +102,14 @@ impl<T: Copy + PartialEq> Reactor<T> {
     // a `set_value(&mut self, new_value: T)` method on `Cell`.
     //
     // As before, that turned out to add too much extra complexity.
-    pub fn set_value(&mut self, _id: InputCellID, _new_value: T) -> bool {
-        unimplemented!()
+    pub fn set_value(&mut self, id: InputCellID, new_value: T) -> bool {
+        let InputCellID(idx) = id;
+        if idx < self.input_vals.len() {
+            self.input_vals[idx] = new_value;
+            true
+        } else {
+            false
+        }
     }
 
     // Adds a callback to the specified compute cell.
