@@ -32,21 +32,26 @@ pub enum RemoveCallbackError {
     NonexistentCallback,
 }
 
-pub struct Reactor<T> {
+struct ComputeCell<'r, T: 'r> {
+    fun: Box<Fn(&[T]) -> T>,
+    deps: &'r [CellID],
+}
+
+pub struct Reactor<'r, T: 'r> {
     input_ids: Vec<InputCellID>,
     input_vals: Vec<T>,
     compute_ids: Vec<ComputeCellID>,
-    compute_fns: Vec<Box<Fn(&[T]) -> T>>,
+    compute_cells: Vec<ComputeCell<'r, T>>,
 }
 
 // You are guaranteed that Reactor will only be tested against types that are Copy + PartialEq.
-impl<T: Copy + PartialEq> Reactor<T> {
+impl<'r, T: Copy + PartialEq + 'r> Reactor<'r, T> {
     pub fn new() -> Self {
         Reactor {
             input_ids: Vec::new(),
             input_vals: Vec::new(),
             compute_ids: Vec::new(),
-            compute_fns: Vec::new(),
+            compute_cells: Vec::new(),
         }
     }
 
@@ -69,15 +74,42 @@ impl<T: Copy + PartialEq> Reactor<T> {
     // (If multiple dependencies do not exist, exactly which one is returned is not defined and
     // will not be tested)
     //
-    // Notice that there is no way to *remove* a cell.
+    // Notice thatuu there is no way to *remove* a cell.
     // This means that you may assume, without checking, that if the dependencies exist at creation
     // time they will continue to exist as long as the Reactor exists.
-    pub fn create_compute<F: Fn(&[T]) -> T>(
+    pub fn create_compute<F>(
         &mut self,
-        _dependencies: &[CellID],
-        _compute_func: F,
-    ) -> Result<ComputeCellID, CellID> {
-        unimplemented!()
+        dependencies: &'r [CellID],
+        compute_func: F,
+    ) -> Result<ComputeCellID, CellID>
+    where
+        F: Fn(&'r [T]) -> T,
+    {
+        for id in dependencies.iter() {
+            match id {
+                CellID::Input(InputCellID(idx)) => {
+                    if !(*idx < self.input_ids.len()) {
+                        return Err(*id);
+                    }
+                }
+                CellID::Compute(ComputeCellID(idx)) => {
+                    if !(*idx < self.compute_ids.len()) {
+                        return Err(*id);
+                    }
+                }
+            }
+        }
+
+        let idx = self.compute_cells.len();
+        let id = ComputeCellID(idx);
+        self.compute_ids.push(id.clone());
+        let cell = ComputeCell {
+            fun: Box::new(compute_func),
+            deps: dependencies,
+        };
+        self.compute_cells.push(cell);
+
+        Ok(id)
     }
 
     // Retrieves the current value of the cell, or None if the cell does not exist.
