@@ -32,20 +32,32 @@ pub enum RemoveCallbackError {
     NonexistentCallback,
 }
 
-struct ComputeCell<'r, T: 'r> {
-    fun: Box<Fn(&[T]) -> T>,
-    deps: &'r [CellID],
+struct ComputeCell<T> {
+    fun: Box<dyn Fn(&[T]) -> T>,
+    deps: Vec<CellID>,
 }
 
-pub struct Reactor<'r, T: 'r> {
+impl<T> ComputeCell<T> {
+    pub fn new<F>(fun: F, deps: &[CellID]) -> Self
+    where
+        F: 'static + Fn(&[T]) -> T,
+    {
+        ComputeCell {
+            fun: Box::new(fun),
+            deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
+        }
+    }
+}
+
+pub struct Reactor<T> {
     input_ids: Vec<InputCellID>,
     input_vals: Vec<T>,
     compute_ids: Vec<ComputeCellID>,
-    compute_cells: Vec<ComputeCell<'r, T>>,
+    compute_cells: Vec<ComputeCell<T>>,
 }
 
 // You are guaranteed that Reactor will only be tested against types that are Copy + PartialEq.
-impl<'r, T: Copy + PartialEq + 'r> Reactor<'r, T> {
+impl<T: Copy + PartialEq> Reactor<T> {
     pub fn new() -> Self {
         Reactor {
             input_ids: Vec::new(),
@@ -77,13 +89,13 @@ impl<'r, T: Copy + PartialEq + 'r> Reactor<'r, T> {
     // Notice thatuu there is no way to *remove* a cell.
     // This means that you may assume, without checking, that if the dependencies exist at creation
     // time they will continue to exist as long as the Reactor exists.
-    pub fn create_compute<F>(
+    pub fn create_compute<F: 'static>(
         &mut self,
-        dependencies: &'r [CellID],
+        dependencies: &[CellID],
         compute_func: F,
     ) -> Result<ComputeCellID, CellID>
     where
-        F: Fn(&'r [T]) -> T,
+        F: Fn(&[T]) -> T,
     {
         for id in dependencies.iter() {
             match id {
@@ -103,10 +115,7 @@ impl<'r, T: Copy + PartialEq + 'r> Reactor<'r, T> {
         let idx = self.compute_cells.len();
         let id = ComputeCellID(idx);
         self.compute_ids.push(id.clone());
-        let cell = ComputeCell {
-            fun: Box::new(compute_func),
-            deps: dependencies,
-        };
+        let cell = ComputeCell::new(compute_func, dependencies);
         self.compute_cells.push(cell);
 
         Ok(id)
@@ -122,7 +131,18 @@ impl<'r, T: Copy + PartialEq + 'r> Reactor<'r, T> {
     pub fn value(&self, id: CellID) -> Option<T> {
         match id {
             CellID::Input(InputCellID(idx)) => self.input_vals.get(idx).cloned(),
-            _ => unreachable!(),
+            CellID::Compute(ComputeCellID(idx)) => {
+                if let Some(cell) = self.compute_cells.get(idx) {
+                    let deps = cell
+                        .deps
+                        .iter()
+                        .map(|c| self.value(*c).unwrap())
+                        .collect::<Vec<T>>();
+                    Some((cell.fun)(&deps))
+                } else {
+                    None
+                }
+            }
         }
     }
 
