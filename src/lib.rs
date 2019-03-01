@@ -1,3 +1,7 @@
+use std::cell::{Cell, RefCell};
+
+use std::fmt::Debug;
+
 /// `InputCellID` is a unique identifier for an input cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InputCellID(usize);
@@ -32,12 +36,14 @@ pub enum RemoveCallbackError {
     NonexistentCallback,
 }
 
-struct ComputeCell<T> {
+struct ComputeCell<'r, T: Debug> {
     fun: Box<dyn Fn(&[T]) -> T>,
     deps: Vec<CellID>,
+    callbacks: Vec<RefCell<Box<dyn 'r + FnMut(T) -> ()>>>,
+    prev_val: Cell<Option<T>>,
 }
 
-impl<T> ComputeCell<T> {
+impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
     pub fn new<F>(fun: F, deps: &[CellID]) -> Self
     where
         F: 'static + Fn(&[T]) -> T,
@@ -45,19 +51,50 @@ impl<T> ComputeCell<T> {
         ComputeCell {
             fun: Box::new(fun),
             deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
+            callbacks: Vec::new(),
+            prev_val: Cell::new(None),
         }
+    }
+
+    pub fn call(&self, reactor: &Reactor<'r, T>) -> T {
+        let deps = self
+            .deps
+            .iter()
+            .map(|c| reactor.value(*c).unwrap())
+            .collect::<Vec<T>>();
+        let nv = (self.fun)(&deps);
+
+        let mut fire_callbacks = false;
+
+        if let Some(pv) = self.prev_val.get() {
+            if nv != pv {
+                self.prev_val.set(Some(nv.clone()));
+                fire_callbacks = true;
+            }
+        } else {
+            self.prev_val.set(Some(nv.clone()));
+            fire_callbacks = true;
+        }
+
+        if fire_callbacks {
+            for c in self.callbacks.iter() {
+                (&mut *c.borrow_mut())(nv.clone());
+            }
+        }
+
+        nv
     }
 }
 
-pub struct Reactor<T> {
+pub struct Reactor<'r, T: Debug> {
     input_ids: Vec<InputCellID>,
     input_vals: Vec<T>,
     compute_ids: Vec<ComputeCellID>,
-    compute_cells: Vec<ComputeCell<T>>,
+    compute_cells: Vec<ComputeCell<'r, T>>,
 }
 
 // You are guaranteed that Reactor will only be tested against types that are Copy + PartialEq.
-impl<T: Copy + PartialEq> Reactor<T> {
+impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     pub fn new() -> Self {
         Reactor {
             input_ids: Vec::new(),
@@ -133,12 +170,7 @@ impl<T: Copy + PartialEq> Reactor<T> {
             CellID::Input(InputCellID(idx)) => self.input_vals.get(idx).cloned(),
             CellID::Compute(ComputeCellID(idx)) => {
                 if let Some(cell) = self.compute_cells.get(idx) {
-                    let deps = cell
-                        .deps
-                        .iter()
-                        .map(|c| self.value(*c).unwrap())
-                        .collect::<Vec<T>>();
-                    Some((cell.fun)(&deps))
+                    Some(cell.call(&self))
                 } else {
                     None
                 }
@@ -176,12 +208,24 @@ impl<T: Copy + PartialEq> Reactor<T> {
     // * Exactly once if the compute cell's value changed as a result of the set_value call.
     //   The value passed to the callback should be the final value of the compute cell after the
     //   set_value call.
-    pub fn add_callback<F: FnMut(T) -> ()>(
+    pub fn add_callback<F: 'r + FnMut(T) -> ()>(
         &mut self,
-        _id: ComputeCellID,
-        _callback: F,
+        id: ComputeCellID,
+        callback: F,
     ) -> Option<CallbackID> {
-        unimplemented!()
+        let ComputeCellID(idx) = id;
+        if !idx < self.compute_ids.len() {
+            return None;
+        }
+
+        let cidx = self.compute_cells[idx].callbacks.len();
+        let cid = CallbackID(cidx);
+
+        self.compute_cells[idx]
+            .callbacks
+            .push(RefCell::new(Box::new(callback)));
+
+        Some(cid)
     }
 
     // Removes the specified callback, using an ID returned from add_callback.
