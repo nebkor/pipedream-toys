@@ -1,9 +1,9 @@
 use std::cell::{Cell, RefCell};
-
+use std::collections::HashSet;
 use std::fmt::Debug;
 
 /// `InputCellID` is a unique identifier for an input cell.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InputCellID(usize);
 /// `ComputeCellID` is a unique identifier for a compute cell.
 /// Values of type `InputCellID` and `ComputeCellID` should not be mutually assignable,
@@ -19,12 +19,12 @@ pub struct InputCellID(usize);
 /// let input = r.create_input(111);
 /// let compute: react::InputCellID = r.create_compute(&[react::CellID::Input(input)], |_| 222).unwrap();
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ComputeCellID(usize);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CallbackID(usize);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CellID {
     Input(InputCellID),
     Compute(ComputeCellID),
@@ -34,6 +34,20 @@ pub enum CellID {
 pub enum RemoveCallbackError {
     NonexistentCell,
     NonexistentCallback,
+}
+
+struct InputCell<T> {
+    downstreams: HashSet<CellID>,
+    value: T,
+}
+
+impl<T: Copy + Debug + PartialEq> InputCell<T> {
+    pub fn new(init: T) -> Self {
+        InputCell {
+            downstreams: HashSet::new(),
+            value: init,
+        }
+    }
 }
 
 struct ComputeCell<'r, T: Debug> {
@@ -87,9 +101,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
 }
 
 pub struct Reactor<'r, T: Debug> {
-    input_ids: Vec<InputCellID>,
-    input_vals: Vec<T>,
-    compute_ids: Vec<ComputeCellID>,
+    input_cells: Vec<InputCell<T>>,
     compute_cells: Vec<ComputeCell<'r, T>>,
 }
 
@@ -97,19 +109,16 @@ pub struct Reactor<'r, T: Debug> {
 impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     pub fn new() -> Self {
         Reactor {
-            input_ids: Vec::new(),
-            input_vals: Vec::new(),
-            compute_ids: Vec::new(),
+            input_cells: Vec::new(),
             compute_cells: Vec::new(),
         }
     }
 
     // Creates an input cell with the specified initial value, returning its ID.
     pub fn create_input(&mut self, initial: T) -> InputCellID {
-        let idx = self.input_ids.len();
+        let idx = self.input_cells.len();
         let id = InputCellID(idx);
-        self.input_ids.push(id.clone());
-        self.input_vals.push(initial);
+        self.input_cells.push(InputCell::new(initial));
         id
     }
 
@@ -134,28 +143,36 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     where
         F: Fn(&[T]) -> T,
     {
+        let cidx = self.compute_cells.len();
+        let cid = ComputeCellID(cidx);
+
         for id in dependencies.iter() {
             match id {
                 CellID::Input(InputCellID(idx)) => {
-                    if !(*idx < self.input_ids.len()) {
+                    if !(*idx < self.input_cells.len()) {
                         return Err(*id);
                     }
                 }
                 CellID::Compute(ComputeCellID(idx)) => {
-                    if !(*idx < self.compute_ids.len()) {
+                    if !(*idx < self.compute_cells.len()) {
                         return Err(*id);
                     }
                 }
             }
         }
 
-        let idx = self.compute_cells.len();
-        let id = ComputeCellID(idx);
-        self.compute_ids.push(id.clone());
+        for id in dependencies.iter() {
+            if let CellID::Input(InputCellID(idx)) = id {
+                let _ = self.input_cells[*idx]
+                    .downstreams
+                    .insert(CellID::Compute(cid.clone()));
+            }
+        }
+
         let cell = ComputeCell::new(compute_func, dependencies);
         self.compute_cells.push(cell);
 
-        Ok(id)
+        Ok(cid)
     }
 
     // Retrieves the current value of the cell, or None if the cell does not exist.
@@ -167,7 +184,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     // We chose not to cover this here, since this exercise is probably enough work as-is.
     pub fn value(&self, id: CellID) -> Option<T> {
         match id {
-            CellID::Input(InputCellID(idx)) => self.input_vals.get(idx).cloned(),
+            CellID::Input(InputCellID(idx)) => self.input_cells.get(idx).map(|i| i.value),
             CellID::Compute(ComputeCellID(idx)) => {
                 if let Some(cell) = self.compute_cells.get(idx) {
                     Some(cell.call(&self))
@@ -188,8 +205,14 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     // As before, that turned out to add too much extra complexity.
     pub fn set_value(&mut self, id: InputCellID, new_value: T) -> bool {
         let InputCellID(idx) = id;
-        if idx < self.input_vals.len() {
-            self.input_vals[idx] = new_value;
+        if idx < self.input_cells.len() {
+            self.input_cells[idx].value = new_value;
+            for d in self.input_cells[idx].downstreams.iter() {
+                if let CellID::Compute(ComputeCellID(idx)) = d {
+                    let cell = &self.compute_cells[*idx];
+                    cell.call(&self);
+                }
+            }
             true
         } else {
             false
@@ -214,7 +237,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         callback: F,
     ) -> Option<CallbackID> {
         let ComputeCellID(idx) = id;
-        if !idx < self.compute_ids.len() {
+        if !idx < self.compute_cells.len() {
             return None;
         }
 
