@@ -58,16 +58,18 @@ struct ComputeCell<'r, T: Debug> {
 }
 
 impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
-    pub fn new<F>(fun: F, deps: &[CellID]) -> Self
+    pub fn new<F>(fun: F, deps: &[CellID], reactor: &Reactor<'r, T>) -> Self
     where
         F: 'static + Fn(&[T]) -> T,
     {
-        ComputeCell {
+        let cell = ComputeCell {
             fun: Box::new(fun),
             deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
             callbacks: Vec::new(),
             prev_val: Cell::new(None),
-        }
+        };
+        cell.call(reactor);
+        cell
     }
 
     pub fn call(&self, reactor: &Reactor<'r, T>) -> T {
@@ -169,7 +171,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
             }
         }
 
-        let cell = ComputeCell::new(compute_func, dependencies);
+        let cell = ComputeCell::new(compute_func, dependencies, &self);
         self.compute_cells.push(cell);
 
         Ok(cid)
@@ -206,6 +208,10 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     pub fn set_value(&mut self, id: InputCellID, new_value: T) -> bool {
         let InputCellID(idx) = id;
         if idx < self.input_cells.len() {
+            let old_value = self.input_cells[idx].value.clone();
+            if old_value == new_value {
+                return true;
+            }
             self.input_cells[idx].value = new_value;
             for d in self.input_cells[idx].downstreams.iter() {
                 if let CellID::Compute(ComputeCellID(idx)) = d {
@@ -237,7 +243,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         callback: F,
     ) -> Option<CallbackID> {
         let ComputeCellID(idx) = id;
-        if !idx < self.compute_cells.len() {
+        if !(idx < self.compute_cells.len()) {
             return None;
         }
 
