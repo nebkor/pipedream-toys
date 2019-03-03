@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
 /// `InputCellID` is a unique identifier for an input cell.
@@ -21,7 +21,7 @@ pub struct InputCellID(usize);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ComputeCellID(usize);
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CallbackID(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,36 +37,38 @@ pub enum RemoveCallbackError {
 }
 
 struct InputCell<T> {
-    downstreams: HashSet<CellID>,
+    clients: HashSet<CellID>,
     value: T,
 }
 
 impl<T: Copy + Debug + PartialEq> InputCell<T> {
     pub fn new(init: T) -> Self {
         InputCell {
-            downstreams: HashSet::new(),
+            clients: HashSet::new(),
             value: init,
         }
     }
 }
 
 struct ComputeCell<'r, T: Debug> {
-    fun: Box<dyn Fn(&[T]) -> T>,
+    fun: Box<dyn 'r + Fn(&[T]) -> T>,
     deps: Vec<CellID>,
-    callbacks: Vec<RefCell<Box<dyn 'r + FnMut(T) -> ()>>>,
+    callbacks: HashMap<CallbackID, RefCell<Box<dyn 'r + FnMut(T)>>>,
     prev_val: Cell<Option<T>>,
+    next_cbid: usize, // increases monotonically; increments on adding a callback
 }
 
 impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
     pub fn new<F>(fun: F, deps: &[CellID]) -> Self
     where
-        F: 'static + Fn(&[T]) -> T,
+        F: 'r + Fn(&[T]) -> T,
     {
         ComputeCell {
             fun: Box::new(fun),
             deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
-            callbacks: Vec::new(),
+            callbacks: HashMap::new(),
             prev_val: Cell::new(None),
+            next_cbid: 0,
         }
     }
 
@@ -91,7 +93,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
         }
 
         if fire_callbacks {
-            for c in self.callbacks.iter() {
+            for c in self.callbacks.values() {
                 (&mut *c.borrow_mut())(nv.clone());
             }
         }
@@ -132,16 +134,16 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     // (If multiple dependencies do not exist, exactly which one is returned is not defined and
     // will not be tested)
     //
-    // Notice thatuu there is no way to *remove* a cell.
+    // Notice that there is no way to *remove* a cell.
     // This means that you may assume, without checking, that if the dependencies exist at creation
     // time they will continue to exist as long as the Reactor exists.
-    pub fn create_compute<F: 'static>(
+    pub fn create_compute<F>(
         &mut self,
         dependencies: &[CellID],
         compute_func: F,
     ) -> Result<ComputeCellID, CellID>
     where
-        F: Fn(&[T]) -> T,
+        F: 'r + Fn(&[T]) -> T,
     {
         let cidx = self.compute_cells.len();
         let cid = ComputeCellID(cidx);
@@ -164,7 +166,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         for id in dependencies.iter() {
             if let CellID::Input(InputCellID(idx)) = id {
                 let _ = self.input_cells[*idx]
-                    .downstreams
+                    .clients
                     .insert(CellID::Compute(cid.clone()));
             }
         }
@@ -212,7 +214,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
                 return true;
             }
             self.input_cells[idx].value = new_value;
-            for d in self.input_cells[idx].downstreams.iter() {
+            for d in self.input_cells[idx].clients.iter() {
                 if let CellID::Compute(ComputeCellID(idx)) = d {
                     let cell = &self.compute_cells[*idx];
                     cell.call(&self);
@@ -246,12 +248,13 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
             return None;
         }
 
-        let cidx = self.compute_cells[idx].callbacks.len();
+        let cidx = self.compute_cells[idx].next_cbid.to_owned();
+        self.compute_cells[idx].next_cbid += 1;
         let cid = CallbackID(cidx);
 
         self.compute_cells[idx]
             .callbacks
-            .push(RefCell::new(Box::new(callback)));
+            .insert(cid, RefCell::new(Box::new(callback)));
 
         Some(cid)
     }
@@ -266,10 +269,15 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         cell: ComputeCellID,
         callback: CallbackID,
     ) -> Result<(), RemoveCallbackError> {
-        unimplemented!(
-            "Remove the callback identified by the CallbackID {:?} from the cell {:?}",
-            callback,
-            cell,
-        )
+        let ComputeCellID(idx) = cell;
+        if let Some(compute_cell) = self.compute_cells.get_mut(idx) {
+            if let Some(_) = compute_cell.callbacks.remove(&callback) {
+                return Ok(());
+            } else {
+                return Err(RemoveCallbackError::NonexistentCallback);
+            }
+        } else {
+            Err(RemoveCallbackError::NonexistentCell)
+        }
     }
 }
