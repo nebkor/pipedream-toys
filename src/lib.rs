@@ -56,6 +56,7 @@ struct ComputeCell<'r, T: Debug> {
     callbacks: HashMap<CallbackID, RefCell<Box<dyn 'r + FnMut(T)>>>,
     prev_val: Cell<Option<T>>,
     next_cbid: usize, // increases monotonically; increments on adding a callback
+    clients: HashSet<CellID>,
 }
 
 impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
@@ -69,6 +70,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
             callbacks: HashMap::new(),
             prev_val: Cell::new(None),
             next_cbid: 0,
+            clients: HashSet::new(),
         }
     }
 
@@ -163,14 +165,28 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
             }
         }
 
+        // register as clients with all dependencies.
+        let cccid = CellID::Compute(cid);
         for id in dependencies.iter() {
-            if let CellID::Input(InputCellID(idx)) = id {
-                let _ = self.input_cells[*idx]
-                    .clients
-                    .insert(CellID::Compute(cid.clone()));
+            match id {
+                CellID::Input(InputCellID(idx)) => {
+                    let _ = self
+                        .input_cells
+                        .get_mut(*idx)
+                        .unwrap()
+                        .clients
+                        .insert(cccid.clone());
+                }
+                CellID::Compute(ComputeCellID(idx)) => {
+                    let _ = self
+                        .compute_cells
+                        .get_mut(*idx)
+                        .unwrap()
+                        .clients
+                        .insert(cccid.clone());
+                }
             }
         }
-
         let cell = ComputeCell::new(compute_func, dependencies);
         cell.call(&self); // set the initial value
         self.compute_cells.push(cell);
@@ -214,11 +230,22 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
                 return true;
             }
             self.input_cells[idx].value = new_value;
-            for d in self.input_cells[idx].clients.iter() {
+
+            let mut downstreams: HashSet<CellID> = HashSet::new();
+            for d in self.input_cells.get(idx).unwrap().clients.iter() {
                 if let CellID::Compute(ComputeCellID(idx)) = d {
                     let cell = &self.compute_cells[*idx];
-                    cell.call(&self);
+                    // first find all the clients that will be called without us
+                    downstreams.extend(cell.clients.iter())
                 }
+            }
+            for d in self.input_cells[idx].clients.union(&downstreams) {
+                let idx = match d {
+                    CellID::Compute(ComputeCellID(idx)) => idx,
+                    _ => unreachable!(),
+                };
+                let cell = &self.compute_cells[*idx];
+                cell.call(&self);
             }
             true
         } else {
