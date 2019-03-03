@@ -58,18 +58,16 @@ struct ComputeCell<'r, T: Debug> {
 }
 
 impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
-    pub fn new<F>(fun: F, deps: &[CellID], reactor: &Reactor<'r, T>) -> Self
+    pub fn new<F>(fun: F, deps: &[CellID]) -> Self
     where
         F: 'static + Fn(&[T]) -> T,
     {
-        let cell = ComputeCell {
+        ComputeCell {
             fun: Box::new(fun),
             deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
             callbacks: Vec::new(),
             prev_val: Cell::new(None),
-        };
-        cell.call(reactor);
-        cell
+        }
     }
 
     pub fn call(&self, reactor: &Reactor<'r, T>) -> T {
@@ -171,7 +169,8 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
             }
         }
 
-        let cell = ComputeCell::new(compute_func, dependencies, &self);
+        let cell = ComputeCell::new(compute_func, dependencies);
+        cell.call(&self); // set the initial value
         self.compute_cells.push(cell);
 
         Ok(cid)
