@@ -37,7 +37,7 @@ pub enum RemoveCallbackError {
 }
 
 struct InputCell<T> {
-    clients: HashSet<CellID>,
+    clients: HashSet<ComputeCellID>,
     value: T,
 }
 
@@ -56,7 +56,7 @@ struct ComputeCell<'r, T: Debug> {
     callbacks: HashMap<CallbackID, RefCell<Box<dyn 'r + FnMut(T)>>>,
     prev_val: Cell<Option<T>>,
     next_cbid: usize, // increases monotonically; increments on adding a callback
-    clients: HashSet<CellID>,
+    clients: HashSet<ComputeCellID>,
 }
 
 impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
@@ -166,7 +166,6 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         }
 
         // register as clients with all dependencies.
-        let cccid = CellID::Compute(cid);
         for id in dependencies.iter() {
             match id {
                 CellID::Input(InputCellID(idx)) => {
@@ -175,7 +174,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
                         .get_mut(*idx)
                         .unwrap()
                         .clients
-                        .insert(cccid.clone());
+                        .insert(cid.clone());
                 }
                 CellID::Compute(ComputeCellID(idx)) => {
                     let _ = self
@@ -183,7 +182,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
                         .get_mut(*idx)
                         .unwrap()
                         .clients
-                        .insert(cccid.clone());
+                        .insert(cid.clone());
                 }
             }
         }
@@ -231,24 +230,47 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
             }
             self.input_cells[idx].value = new_value;
 
-            let mut downstreams: HashSet<CellID> = HashSet::new();
-            for d in self.input_cells.get(idx).unwrap().clients.iter() {
-                if let CellID::Compute(ComputeCellID(idx)) = d {
+            let mut clients1 = self.input_cells[idx].clients.clone();
+            let mut clients2 = HashSet::new();
+
+            let mut done = false;
+
+            // Recursively iterate through all clients until we've converged on the
+            // the stable set of them. Does at least N extra checks, where N is
+            // the numer of ultimate clients.
+            while !done {
+                for client in clients1.iter() {
+                    clients2.insert(client.clone());
+                    let ComputeCellID(idx) = client;
                     let cell = &self.compute_cells[*idx];
                     // first find all the clients that will be called without us
-                    downstreams.extend(cell.clients.iter())
+                    clients2.extend(cell.clients.iter());
                 }
+                for client in clients2.iter() {
+                    let ComputeCellID(idx) = client;
+                    let cell = &self.compute_cells[*idx];
+                    clients1.extend(cell.clients.iter());
+                }
+
+                done = clients1 == clients2;
             }
-            for d in self.input_cells[idx].clients.union(&downstreams) {
-                let idx = match d {
-                    CellID::Compute(ComputeCellID(idx)) => idx,
-                    _ => unreachable!(),
-                };
-                let cell = &self.compute_cells[*idx];
+
+            // This has the potential to call more clients than needed, but ComputeCells
+            // cache their previous value and only invoke their callbacks on change,
+            // so client callbacks won't get invoked more than once.
+            //
+            // There's an implicit assumption here that each ComputeCell's function is
+            // cheap to run, which is probably not true in general. We could do a
+            // topological sort of the client graph to ensure we only call leaf nodes.
+            for client in clients1 {
+                let ComputeCellID(idx) = client;
+                let cell = &self.compute_cells[idx];
                 cell.call(&self);
             }
+            // we have set a new value and called all clients, return true
             true
         } else {
+            // the new value was the same as the old value, return false
             false
         }
     }
