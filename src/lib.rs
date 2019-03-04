@@ -24,6 +24,8 @@ pub struct ComputeCellID(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CallbackID(usize);
 
+pub type Callback<'reactor, T> = RefCell<Box<dyn 'reactor + FnMut(T)>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CellID {
     Input(InputCellID),
@@ -53,7 +55,7 @@ impl<T: Copy + Debug + PartialEq> InputCell<T> {
 struct ComputeCell<'r, T: Debug> {
     fun: Box<dyn 'r + Fn(&[T]) -> T>,
     deps: Vec<CellID>,
-    callbacks: HashMap<CallbackID, RefCell<Box<dyn 'r + FnMut(T)>>>,
+    callbacks: HashMap<CallbackID, Callback<'r, T>>,
     prev_val: Cell<Option<T>>,
     next_cbid: usize, // increases monotonically; increments on adding a callback
     clients: HashSet<ComputeCellID>,
@@ -66,7 +68,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
     {
         ComputeCell {
             fun: Box::new(fun),
-            deps: deps.iter().map(|d| d.to_owned().clone()).collect(),
+            deps: deps.to_vec(),
             callbacks: HashMap::new(),
             prev_val: Cell::new(None),
             next_cbid: 0,
@@ -86,17 +88,17 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
 
         if let Some(pv) = self.prev_val.get() {
             if nv != pv {
-                self.prev_val.set(Some(nv.clone()));
+                self.prev_val.set(Some(nv));
                 fire_callbacks = true;
             }
         } else {
-            self.prev_val.set(Some(nv.clone()));
+            self.prev_val.set(Some(nv));
             fire_callbacks = true;
         }
 
         if fire_callbacks {
             for c in self.callbacks.values() {
-                (&mut *c.borrow_mut())(nv.clone());
+                (&mut *c.borrow_mut())(nv);
             }
         }
 
@@ -104,6 +106,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> ComputeCell<'r, T> {
     }
 }
 
+#[derive(Default)]
 pub struct Reactor<'r, T: Debug> {
     input_cells: Vec<InputCell<T>>,
     compute_cells: Vec<ComputeCell<'r, T>>,
@@ -153,12 +156,12 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         for id in dependencies.iter() {
             match id {
                 CellID::Input(InputCellID(idx)) => {
-                    if !(*idx < self.input_cells.len()) {
+                    if *idx >= self.input_cells.len() {
                         return Err(*id);
                     }
                 }
                 CellID::Compute(ComputeCellID(idx)) => {
-                    if !(*idx < self.compute_cells.len()) {
+                    if *idx >= self.compute_cells.len() {
                         return Err(*id);
                     }
                 }
@@ -169,20 +172,10 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         for id in dependencies.iter() {
             match id {
                 CellID::Input(InputCellID(idx)) => {
-                    let _ = self
-                        .input_cells
-                        .get_mut(*idx)
-                        .unwrap()
-                        .clients
-                        .insert(cid.clone());
+                    let _ = self.input_cells[*idx].clients.insert(cid);
                 }
                 CellID::Compute(ComputeCellID(idx)) => {
-                    let _ = self
-                        .compute_cells
-                        .get_mut(*idx)
-                        .unwrap()
-                        .clients
-                        .insert(cid.clone());
+                    let _ = self.compute_cells[*idx].clients.insert(cid);
                 }
             }
         }
@@ -224,7 +217,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     pub fn set_value(&mut self, id: InputCellID, new_value: T) -> bool {
         let InputCellID(idx) = id;
         if idx < self.input_cells.len() {
-            let old_value = self.input_cells[idx].value.clone();
+            let old_value = self.input_cells[idx].value;
             if old_value == new_value {
                 return true;
             }
@@ -293,7 +286,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
         callback: F,
     ) -> Option<CallbackID> {
         let ComputeCellID(idx) = id;
-        if !(idx < self.compute_cells.len()) {
+        if idx >= self.compute_cells.len() {
             return None;
         }
 
@@ -320,7 +313,7 @@ impl<'r, T: Copy + Debug + PartialEq + 'r> Reactor<'r, T> {
     ) -> Result<(), RemoveCallbackError> {
         let ComputeCellID(idx) = cell;
         if let Some(compute_cell) = self.compute_cells.get_mut(idx) {
-            if let Some(_) = compute_cell.callbacks.remove(&callback) {
+            if compute_cell.callbacks.remove(&callback).is_some() {
                 return Ok(());
             } else {
                 return Err(RemoveCallbackError::NonexistentCallback);
